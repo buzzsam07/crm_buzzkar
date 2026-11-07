@@ -1,12 +1,12 @@
 """Database + auth layer for the BuzzKar Organiser (Supabase / Postgres)."""
 import os
-from contextlib import contextmanager
 
 import bcrypt
 import pandas as pd
 import psycopg2
 import psycopg2.errors
 import psycopg2.extras
+import psycopg2.pool
 
 TICKET_COLS = ["id", "title", "description", "client", "category", "priority", "status",
                "assignee", "created_by", "due_date", "created_at", "updated_at", "closed_at"]
@@ -66,27 +66,60 @@ def _db_url():
     return url
 
 
-@contextmanager
-def _conn():
-    conn = psycopg2.connect(_db_url(), connect_timeout=10)
+# Connections are reused (a pool) instead of opening a new one per query,
+# which is what made pages slow to load.
+_pool = None
+
+
+def _get_pool():
+    global _pool
+    if _pool is None:
+        _pool = psycopg2.pool.ThreadedConnectionPool(1, 5, _db_url(), connect_timeout=10)
+    return _pool
+
+
+def _reset_pool():
+    global _pool
+    if _pool is not None:
+        try:
+            _pool.closeall()
+        except Exception:
+            pass
+    _pool = None
+
+
+def _run(sql, params, fetch):
+    pool = _get_pool()
+    conn = pool.getconn()
+    broken = False
     try:
-        yield conn
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            if fetch == "one":
+                result = cur.fetchone()
+            elif fetch == "all":
+                result = cur.fetchall()
+            else:
+                result = None
         conn.commit()
+        return result
+    except psycopg2.OperationalError:
+        broken = True
+        raise
     except Exception:
         conn.rollback()
         raise
     finally:
-        conn.close()
+        pool.putconn(conn, close=broken or bool(conn.closed))
 
 
 def _exec(sql, params=(), fetch=None):
-    with _conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, params)
-        if fetch == "one":
-            return cur.fetchone()
-        if fetch == "all":
-            return cur.fetchall()
-    return None
+    try:
+        return _run(sql, params, fetch)
+    except psycopg2.OperationalError:
+        # Connection went stale (idle timeout etc.): rebuild the pool and retry once
+        _reset_pool()
+        return _run(sql, params, fetch)
 
 
 def init_db():

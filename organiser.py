@@ -27,20 +27,28 @@ def _init():
 
 _init()
 
+# One-time messages (set before a rerun) show as a toast that disappears by itself
+if "flash" in st.session_state:
+    st.toast(st.session_state.pop("flash"), icon="✅")
+
 
 # ---------- auth screens ----------
 def login_screen():
-    st.title("🗂️ BuzzKar Organiser")
-    with st.form("login"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        if st.form_submit_button("Log in"):
+    box = st.empty()
+    with box.container():
+        st.title("🗂️ BuzzKar Organiser")
+        with st.form("login"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in")
+    if submitted:
+        with st.spinner("Logging in..."):
             user = db.verify_login(username.strip(), password)
-            if user:
-                st.session_state["user"] = user
-                st.rerun()
-            else:
-                st.error("Wrong username or password.")
+        if user:
+            st.session_state["user"] = user
+            box.empty()  # remove the login form right away; the app carries on below
+        else:
+            st.error("Wrong username or password.")
 
 
 def password_form(user, key):
@@ -66,6 +74,7 @@ def password_form(user, key):
 
 if "user" not in st.session_state:
     login_screen()
+if "user" not in st.session_state:
     st.stop()
 
 user = st.session_state["user"]
@@ -73,17 +82,20 @@ me = user["name"]
 is_admin = user["role"] == "admin"
 
 if user["must_change"]:
-    st.title("🔑 Set a new password")
-    st.info("First login: please choose your own password before continuing.")
-    if password_form(user, "pw_forced"):
-        st.rerun()
-    st.stop()
+    box = st.empty()
+    with box.container():
+        st.title("🔑 Set a new password")
+        st.info("First login: please choose your own password before continuing.")
+        changed = password_form(user, "pw_forced")
+    if not changed:
+        st.stop()
+    box.empty()
 
 # ---------- sidebar ----------
 st.sidebar.markdown(f"Signed in as **{me}**" + (" (admin)" if is_admin else ""))
 with st.sidebar.expander("Change password"):
     if password_form(user, "pw_side"):
-        st.success("Password updated ✅")
+        st.toast("Password updated", icon="✅")
 if st.sidebar.button("Log out"):
     st.session_state.pop("user", None)
     st.rerun()
@@ -201,7 +213,8 @@ with tab_new:
             else:
                 new_id = db.create_ticket(title.strip(), description.strip(), client.strip(),
                                           category, priority, assignee, me, due)
-                st.success(f"Ticket #{new_id} created and assigned to {assignee} ✅")
+                st.session_state["flash"] = f"Ticket #{new_id} created and assigned to {assignee}"
+                st.rerun()
 
 if is_admin:
     with tabs[3]:
@@ -245,7 +258,11 @@ if is_admin:
                 if st.form_submit_button("Create account"):
                     err = db.create_user(n_user.strip(), n_name.strip(), n_pw, n_role) \
                         if n_user.strip() and n_name.strip() else "Fill in username and display name."
-                    st.error(err) if err else st.success("Account created. They'll set their own password on first login.")
+                    if err:
+                        st.error(err)
+                    else:
+                        st.session_state["flash"] = "Account created. They'll set their own password on first login."
+                        st.rerun()
         with b:
             with st.form("reset_pw", clear_on_submit=True):
                 st.markdown("**Reset someone's password**")
@@ -253,7 +270,10 @@ if is_admin:
                 r_pw = st.text_input("New temporary password", type="password")
                 if st.form_submit_button("Reset password"):
                     err = db.reset_password(r_user, r_pw)
-                    st.error(err) if err else st.success("Reset. They must change it on next login.")
+                    if err:
+                        st.error(err)
+                    else:
+                        st.toast("Password reset. They must change it on next login.", icon="✅")
 
         if not df.empty:
             st.divider()
