@@ -3,3 +3,5 @@ pandas
 psycopg2-binary
 bcrypt
 tzdata
+google-api-python-client
+google-auth

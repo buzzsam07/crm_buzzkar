@@ -8,6 +8,7 @@ import pandas as pd
 import streamlit as st
 
 import db
+import gcal
 
 CATEGORIES = ["Content/Copy", "Design", "Video", "Meta Ads", "Google Ads",
               "SEO", "Client call/Meeting", "Research", "Admin", "Other"]
@@ -29,7 +30,8 @@ _init()
 
 # One-time messages (set before a rerun) show as a toast that disappears by itself
 if "flash" in st.session_state:
-    st.toast(st.session_state.pop("flash"), icon="✅")
+    _msg = st.session_state.pop("flash")
+    st.toast(_msg, icon=None if "⚠️" in _msg else "✅")
 
 
 # ---------- auth screens ----------
@@ -103,6 +105,17 @@ if st.sidebar.button("Log out"):
 team = db.team_names()
 
 
+def sync_calendar(tid):
+    """Push one ticket to Google Calendar. Never blocks saving; returns a warning text (or '')."""
+    if not gcal.is_configured():
+        return ""
+    with st.spinner("Updating calendar..."):
+        result = gcal.safe_sync(tid)
+    if result and (result.startswith("error") or "no calendar" in result):
+        return f" ⚠️ Calendar not updated ({result})"
+    return ""
+
+
 # ---------- ticket helpers ----------
 def fmt_ts(ts):
     return ts.astimezone(IST).strftime("%d %b %Y, %I:%M %p")
@@ -130,24 +143,33 @@ def ticket_panel(tid, prefix):
     st.divider()
     st.subheader(f"#{t['id']} · {t['title']}")
     due = t["due_date"].strftime("%d %b %Y") if t["due_date"] else "no due date"
+    on_cal = " · 📅 on calendar" if t["gcal_event_id"] else ""
     st.caption(f"{ICON[t['priority']]} {t['priority']} · {t['client'] or 'No client'} · "
-               f"{t['category']} · due {due} · created by {t['created_by']}")
+               f"{t['category']} · due {due} · created by {t['created_by']}{on_cal}")
     st.write(t["description"] or "_No description_")
 
-    c1, c2, c3 = st.columns([2, 2, 1])
+    c1, c2, c3, c4 = st.columns([2, 2, 2, 1])
     status = c1.selectbox("Status", STATUSES, index=STATUSES.index(t["status"]), key=f"{prefix}_st_{tid}")
     names = team if t["assignee"] in team else team + [t["assignee"]]
     assignee = c2.selectbox("Assignee", names, index=names.index(t["assignee"]), key=f"{prefix}_as_{tid}")
-    c3.write("")
-    c3.write("")
-    if c3.button("Save", key=f"{prefix}_save_{tid}"):
+    due_val = c3.date_input("Due date", value=t["due_date"], key=f"{prefix}_due_{tid}")
+    c4.write("")
+    c4.write("")
+    if c4.button("Save", key=f"{prefix}_save_{tid}"):
         db.set_status(tid, status, me)
         db.set_assignee(tid, assignee, me)
+        db.set_due_date(tid, due_val, me)
+        warn = sync_calendar(tid)
+        if warn:
+            st.session_state["flash"] = f"Saved.{warn}"
         st.rerun()
 
     if t["status"] != "Closed":
         if st.button("✅ Close ticket", key=f"{prefix}_close_{tid}", type="primary"):
             db.set_status(tid, "Closed", me)
+            warn = sync_calendar(tid)
+            if warn:
+                st.session_state["flash"] = f"Ticket closed.{warn}"
             st.rerun()
 
     with st.form(f"{prefix}_upd_{tid}", clear_on_submit=True):
@@ -213,7 +235,8 @@ with tab_new:
             else:
                 new_id = db.create_ticket(title.strip(), description.strip(), client.strip(),
                                           category, priority, assignee, me, due)
-                st.session_state["flash"] = f"Ticket #{new_id} created and assigned to {assignee}"
+                warn = sync_calendar(new_id)
+                st.session_state["flash"] = f"Ticket #{new_id} created and assigned to {assignee}.{warn}"
                 st.rerun()
 
 if is_admin:
@@ -247,7 +270,7 @@ if is_admin:
         st.subheader("Team accounts")
         st.dataframe(db.list_users(), use_container_width=True, hide_index=True)
 
-        a, b = st.columns(2)
+        a, b, c = st.columns(3)
         with a:
             with st.form("add_user", clear_on_submit=True):
                 st.markdown("**Add a team member**")
@@ -274,11 +297,54 @@ if is_admin:
                         st.error(err)
                     else:
                         st.toast("Password reset. They must change it on next login.", icon="✅")
+        with c:
+            with st.form("set_email", clear_on_submit=True):
+                st.markdown("**Set someone's Google email**")
+                e_user = st.selectbox("Username", db.list_users()["username"].tolist(), key="email_user")
+                e_mail = st.text_input("Google account they use for calendar")
+                if st.form_submit_button("Save email"):
+                    if "@" not in e_mail:
+                        st.error("Enter a valid email address.")
+                    else:
+                        db.set_user_email(e_user, e_mail.strip())
+                        st.session_state["flash"] = "Email saved."
+                        st.rerun()
+
+        st.divider()
+        st.subheader("Google Calendar")
+        if not gcal.is_configured():
+            st.info("Calendar sync isn't connected yet. Add GOOGLE_SERVICE_ACCOUNT_JSON in Secrets to switch it on.")
+        else:
+            k1, k2 = st.columns(2)
+            if k1.button("1. Create & share calendars"):
+                with st.spinner("Setting up calendars..."):
+                    try:
+                        notes = gcal.setup_calendars()
+                        st.session_state["flash"] = "Calendars ready. " + " ".join(notes)
+                    except Exception as e:
+                        st.session_state["flash"] = f"⚠️ Setup failed: {e}"
+                st.rerun()
+            if k2.button("2. Sync all tickets now"):
+                with st.spinner("Syncing..."):
+                    try:
+                        counts, errors = gcal.sync_all()
+                        summary = ", ".join(f"{v} {k}" for k, v in counts.items()) or "nothing to do"
+                        st.session_state["flash"] = f"Synced: {summary}." + (
+                            f" ⚠️ {len(errors)} error(s), first: {errors[0]}" if errors else "")
+                    except Exception as e:
+                        st.session_state["flash"] = f"⚠️ Sync failed: {e}"
+                st.rerun()
+            links = gcal.add_calendar_links()
+            if links:
+                st.caption("If a share email doesn't arrive, send the person their add-calendar link:")
+                for name, url in links:
+                    st.code(f"{name}: {url}", language=None)
 
         if not df.empty:
             st.divider()
             st.subheader("Delete a ticket")
             del_id = pick_ticket(df, "del_pick")
             if del_id and st.button("Delete permanently"):
+                gcal.safe_remove(del_id)
                 db.delete_ticket(del_id)
                 st.rerun()

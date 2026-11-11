@@ -43,6 +43,11 @@ CREATE TABLE IF NOT EXISTS updates (
     hours REAL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Calendar sync columns (safe to run on an existing database)
+ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS calendar_id TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS gcal_calendar_id TEXT;
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS gcal_event_id TEXT;
 -- Lock the tables away from Supabase's public REST API. Our app connects
 -- directly as the database owner, which is not affected by this.
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
@@ -191,8 +196,30 @@ def team_names():
 
 
 def list_users():
-    rows = _exec("SELECT username, name, role, must_change FROM users ORDER BY id", fetch="all")
-    return pd.DataFrame(rows, columns=["username", "name", "role", "must_change"])
+    rows = _exec("SELECT username, name, email, role, must_change, "
+                 "(calendar_id IS NOT NULL) AS calendar FROM users ORDER BY id", fetch="all")
+    return pd.DataFrame(rows, columns=["username", "name", "email", "role", "must_change", "calendar"])
+
+
+def list_users_full():
+    return _exec("SELECT * FROM users ORDER BY id", fetch="all")
+
+
+def get_user_by_name(name):
+    return _exec("SELECT * FROM users WHERE name = %s", (name,), fetch="one")
+
+
+def admin_emails():
+    rows = _exec("SELECT email FROM users WHERE role = 'admin' AND email IS NOT NULL", fetch="all")
+    return [r["email"] for r in rows]
+
+
+def set_user_email(username, email):
+    _exec("UPDATE users SET email = %s WHERE lower(username) = lower(%s)", (email or None, username))
+
+
+def set_user_calendar(user_id, calendar_id):
+    _exec("UPDATE users SET calendar_id = %s WHERE id = %s", (calendar_id, user_id))
 
 
 # ---------- tickets ----------
@@ -251,6 +278,25 @@ def set_assignee(tid, assignee, who):
         return
     _exec("UPDATE tickets SET assignee = %s, updated_at = now() WHERE id = %s", (assignee, tid))
     add_update(tid, who, f"Reassigned: {t['assignee']} → {assignee}")
+
+
+def set_due_date(tid, due, who):
+    t = get_ticket(tid)
+    if not t or t["due_date"] == due:
+        return
+    _exec("UPDATE tickets SET due_date = %s, updated_at = now() WHERE id = %s", (due, tid))
+    add_update(tid, who, f"Due date: {t['due_date'] or 'none'} → {due or 'none'}")
+
+
+def set_gcal(tid, calendar_id, event_id):
+    _exec("UPDATE tickets SET gcal_calendar_id = %s, gcal_event_id = %s WHERE id = %s",
+          (calendar_id, event_id, tid))
+
+
+def tickets_needing_sync():
+    rows = _exec("SELECT id FROM tickets WHERE (status <> 'Closed' AND due_date IS NOT NULL) "
+                 "OR gcal_event_id IS NOT NULL ORDER BY id", fetch="all")
+    return [r["id"] for r in rows]
 
 
 def delete_ticket(tid):
