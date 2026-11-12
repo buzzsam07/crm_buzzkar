@@ -1,12 +1,21 @@
-"""
-Scheduled job: makes Google Calendar match the tickets (the safety net behind the instant sync).
-Run by GitHub Actions every hour; can also be run by hand:  python3 sync_calendar.py
-"""
-import gcal
+name: Calendar sync
 
-counts, errors = gcal.sync_all()
-print("Sync finished:", counts or "nothing to do")
-for e in errors:
-    print("ERROR", e)
-if errors:
-    raise SystemExit(1)  # marks the GitHub run as failed so you get an email
+on:
+  schedule:
+    - cron: "30 * * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install psycopg2-binary bcrypt pandas google-api-python-client google-auth
+      - run: python sync_calendar.py
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          APP_URL: ${{ secrets.APP_URL }}
